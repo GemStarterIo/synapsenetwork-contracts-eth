@@ -1,0 +1,104 @@
+import { waffle } from "hardhat";
+import { expect } from "chai";
+import { Wallet, BigNumber, utils } from "ethers";
+
+import SynapseVestingArtifacts from "../../artifacts/contracts/SynapseVesting.sol/SynapseVesting.json";
+import SynapseNetworkArtifacts from "../../artifacts/contracts/SynapseNetwork.sol/SynapseNetwork.json";
+import SynapseStakingArtifacts from "../../artifacts/contracts/SynapseStaking.sol/SynapseStaking.json";
+import ERC20MockArtifact from "../../artifacts/contracts/mocks/ERC20Mock.sol/ERC20Mock.json";
+
+import { SynapseVesting, SynapseNetwork, SynapseStaking, ERC20Mock } from "../../typechain";
+import { getBigNumber, latest, duration, advanceTimeAndBlock } from "../utilities";
+
+const { provider, deployContract } = waffle;
+
+describe("Synapse Vesting Claim And Stake", () => {
+  const [deployer, alice, bob, carol] = provider.getWallets() as Wallet[];
+
+  let synapseVesting: SynapseVesting;
+  let synapseToken: SynapseNetwork;
+  let staking: SynapseStaking;
+  let lpToken: ERC20Mock;
+
+  const seven_days = 7 * 24 * 60 * 60;
+
+  let timestamp: BigNumber;
+
+  const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+  beforeEach(async () => {
+    synapseToken = (await deployContract(deployer, SynapseNetworkArtifacts, [deployer.address])) as SynapseNetwork;
+    await advanceTimeAndBlock(3 * 24 * 3600 + 30 * 60);
+    await synapseToken.setRestrictionActive(false);
+    synapseVesting = (await deployContract(deployer, SynapseVestingArtifacts, [])) as SynapseVesting;
+    lpToken = (await deployContract(deployer, ERC20MockArtifact, ["SNP-ETH PAIR", "UNI-V2", 18, utils.parseEther("10000")])) as ERC20Mock;
+    staking = (await deployContract(deployer, SynapseStakingArtifacts, [seven_days, seven_days])) as SynapseStaking;
+
+    await synapseToken.changeFeeContract(staking.address);
+
+    await synapseVesting.init(synapseToken.address);
+    await staking.init(synapseToken.address, lpToken.address, synapseVesting.address);
+
+    await synapseToken.setExcludedFromFees(synapseVesting.address, true);
+    await synapseToken.setExcludedFromFees(staking.address, true);
+  });
+
+  describe("onlyOwner", () => {
+    it("should revert if restricted function's caller is not owner", async () => {
+      await expect(synapseVesting.connect(alice).setStakingAddress(alice.address)).to.be.revertedWith("caller is not the owner");
+    });
+  });
+
+  describe("claimAndStake", () => {
+    beforeEach(async () => {
+      await synapseToken.transfer(synapseVesting.address, getBigNumber(1000));
+      await synapseToken.transfer(alice.address, 10);
+      await synapseToken.connect(alice).approve(staking.address, 10);
+
+      timestamp = await latest();
+      await synapseVesting.massAddHolders(
+        [alice.address, alice.address, bob.address, carol.address, carol.address, bob.address, carol.address],
+        [3456789, 22, 33, 44, 55, 66, 77],
+        [34567890, 333, 555, 666, 777, 888, 111],
+        timestamp.add(duration.days(4)),
+        timestamp.add(duration.days(27))
+      );
+
+      await synapseToken.approve(staking.address, getBigNumber(66528));
+      await staking.notifyRewardAmount(getBigNumber(6048), getBigNumber(60480));
+
+      timestamp = await latest();
+
+      await advanceTimeAndBlock(seven_days);
+    });
+
+    it("should correctly claim and stake", async function () {
+      const claimed_amount: number = 7514898;
+      await synapseVesting.setStakingAddress(staking.address);
+
+      await expect(synapseVesting.connect(alice).claimAndStake())
+        .to.emit(synapseVesting, "Claimed")
+        .withArgs(alice.address, claimed_amount)
+        .and.to.emit(synapseToken, "Transfer")
+        .withArgs(synapseVesting.address, staking.address, claimed_amount)
+        .and.to.emit(staking, "StakeAdded")
+        .withArgs(alice.address, claimed_amount);
+
+      const tokenStaking = await staking.tokenStaking();
+      expect(tokenStaking["lastUpdateTime"]).to.be.equal(timestamp);
+    });
+
+    it("should revert when staking contract not configured", async function () {
+      await expect(synapseVesting.connect(alice).claimAndStake()).to.be.revertedWith("Staking contract not configured");
+    });
+
+    it("should revert when staking contract deny", async function () {
+      await synapseVesting.setStakingAddress(staking.address);
+
+      await staking.connect(alice).addTokenStake(10);
+      await staking.connect(alice).requestUnstake();
+
+      await expect(synapseVesting.connect(alice).claimAndStake()).to.be.revertedWith("Unable to stake");
+    });
+  });
+});

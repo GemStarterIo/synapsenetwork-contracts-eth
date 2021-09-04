@@ -1,0 +1,21 @@
+# folders
+node_modules/
+artifacts/
+build/
+cache/
+typechain/
+coverage/
+data/
+
+# files
+*.env
+*.log
+coverage.json
+
+.DS_Store
+package-lock.json
+
+bin
+pnpm-lock.yaml
+.vscode
+yarn.lock
